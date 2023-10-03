@@ -29,25 +29,25 @@
 // SOFTWARE.
 //
 
-module.exports = function(RED) {
+module.exports = function (RED) {
 
 	"use strict";
-	
+
 	// Debug:
 	// https://nodejs.org/api/util.html
 	// export NODE_DEBUG=socketcan-out  for all debug events
 	const util = require('util');
 	const debuglog = util.debuglog('socketcan-out');
-	
-    var can = require('socketcan');
 
-    function SocketcanReceiveNode(config) {
+	var can = require('socketcan');
 
-		RED.nodes.createNode(this,config);
-		
+	function SocketcanReceiveNode(config) {
+
+		RED.nodes.createNode(this, config);
+
 		this.config = RED.nodes.getNode(config.config);
 
-		if(this.config) {
+		if (this.config) {
 			this.interface = this.config.interface;
 		}
 		else {
@@ -58,65 +58,141 @@ module.exports = function(RED) {
 		debuglog("CAN interface = " + this.interface);
 
 		var node = this;
+		// Access the flow context object
+		const flowContext = this.context().flow;
+
 
 		// Tell the world that we are connecting to the interface
-		this.status({fill:"yellow",shape:"dot",text:"connecting... " + "<" + this.interface + ">"});
+		//this.status({fill:"yellow",shape:"dot",text: "connecting... " + "<" + this.interface + ">"});
+		this.status({ fill: "yellow", shape: "dot", text: "Waiting for a KCD file... " + "<" + this.interface + ">" });
 
-		var sock;
-		try {
-			// Create raw interface with timestamp
-			sock = can.createRawChannel("" + this.interface, {
-				timestamps: true
-			});
-		} catch(err) { 
-			// Did not handle this interface
-			node.error("Error: " + err.message + this.interface);
-			this.status({fill:"red",shape:"dot",text: err.message + "<" + this.interface + ">" });
-		}
-		if (sock) {
+		var channel;
+		var network;
+		var databaseService;
 
-			// Start things up
-			sock.start();
+		var started = false;
 
-			// Tell the world we are on
-			this.status({fill:"green",shape:"dot",text:"connected " + "<" + this.interface + ">" });
-		
-			// Add a message listener
-			sock.addListener("onMessage",function(frame) {
-				debuglog("CAN message :",frame);
-				var msg={};
-				msg.payload = {};
-				msg.payload.timestamp = frame.timestamp || new Date().getTime();
-				msg.payload.ext       = frame.ext || false;
-				msg.payload.canid     = frame.id; 
-				msg.payload.dlc       = frame.data.length;
-				msg.payload.rtr       = frame.rtr || false;
-				msg.payload.data = [];
-				//msg.payload.data.push(frame.data);
+		// if (sock && network) {
+
+
+
+
+		// 	// Tell the world we are on
+		// 	//this.status({fill:"green",shape:"dot",text:"connected " + "<" + this.interface + ">" });
+
+
+		// 	db_u52.messages["Enginestat_4E0"].signals["OilTemp"].onChange(function (s) {
+		// 		console.log("Temp " + s.value);
+		// 		var msg = {};
+		// 		msg.payload = {};
+		// 		msg.payload = JSON.stringify(s);
+		// 		node.send([{ payload: network }, { payload: "huy" }]);
+		// 	});
+
+
+		// Add a message listener
+		// sock.addListener("onMessage",function(frame) {
+		// 	debuglog("CAN message :",frame);
+		// 	var msg={};
+		// 	msg.payload = {};
+		// 	msg.payload.timestamp = frame.timestamp || new Date().getTime();
+		// 	msg.payload.ext       = frame.ext || false;
+		// 	msg.payload.canid     = frame.id; 
+		// 	msg.payload.dlc       = frame.data.length;
+		// 	msg.payload.rtr       = frame.rtr || false;
+		// 	msg.payload.data = [];
+		// 	//msg.payload.data.push(frame.data);
+
+		// 	msg.payload.data =  Array.prototype.slice.call(frame.data, 0);
+		// 	node.send(msg);
+		// });
+		this.on("input", function (msg) {
+			if (!started) {
+				try {
+					// Create raw interface with timestamp
+					channel = can.createRawChannel("" + this.interface, {
+						timestamps: true
+					});
+
+					network = can.parseNetworkDescription(msg.payload.kcdPath);
+					const networkBusNames = Object.keys(network.buses);
+					databaseService = new can.DatabaseService(channel, network.buses[networkBusNames[0]]);
+
+					const tabulatorFormattedData = [];
+					var tabulatorRowId = 0;
+
+					// Iterate through each message
+					network.buses[networkBusNames[0]].messages.forEach((m) => {
+						m.signals.forEach((s) => {
+
+							tabulatorFormattedData.push({
+								"id": tabulatorRowId,
+								"frame_name": m.name,
+								"signal_name": s.name,
+								"value": "" // Leave it empty as requested
+							});
+
+							(function (rowId, frameName, signalName) {
+								databaseService.messages[m.name].signals[s.name].onChange(function (s) {
+									var tabulatorData = {
+										"id": rowId, // Access the captured rowId
+										"value": s.unit !== undefined
+											? s.value + (s.unit ? " " + s.unit : "")
+											: s.value
+									};
+
+									var signalData = {
+										"id": frameName + "." + signalName,
+										"value": s.value
+									};
+
+									node.send([null, { payload: tabulatorData }, { signalName: frameName + "." + signalName, payload: s.value }]);
+								});
+							})(tabulatorRowId, m.name, s.name); // Pass tabulatorRowId to the IIFE
+
+							tabulatorRowId++;
+						});
+					});
+
 					
-				msg.payload.data =  Array.prototype.slice.call(frame.data, 0);
-				node.send(msg);
-			});
-			
-			///////////////////////////////////////////////////////////////////
-			//                          on close	
-			///////////////////////////////////////////////////////////////////
-			this.on("close", function(removed, done) {
-				
-				sock.stop();
-				
-				// Tell the worl we had gone down
-				this.status({fill:"red",shape:"dot",text:"disconnected."});
+					flowContext.set("canTableData", tabulatorFormattedData);
+					node.send([{ payload: tabulatorFormattedData }, null, null]);
 
-				if (removed) {
-					// This node has been deleted
-				} else {
-					// This node is being restarted
+					channel.start();
+
+					this.status({ fill: "green", shape: "dot", text: "connected " + "<" + this.interface + ">" });
+					started = true;
+
+				} catch (err) {
+					// Did not handle this interface
+					node.error("Error: " + err.message + this.interface);
+					this.status({ fill: "red", shape: "dot", text: err.message + "<" + this.interface + ">" });
 				}
-			
-				done();
-			});	
-		}
-    }
-    RED.nodes.registerType("socketcan-out",SocketcanReceiveNode);
+
+				// Send the processed message to the next node
+				// node.send(msg);
+			}
+		});
+
+		///////////////////////////////////////////////////////////////////
+		//                          on close	
+		///////////////////////////////////////////////////////////////////
+		this.on("close", function (removed, done) {
+
+			channel.stop();
+
+			// Tell the worl we had gone down
+			this.status({ fill: "red", shape: "dot", text: "disconnected." });
+
+			if (removed) {
+				// This node has been deleted
+			} else {
+				// This node is being restarted
+			}
+
+			done();
+		});
+
+	}
+	RED.nodes.registerType("socketcan-out", SocketcanReceiveNode);
 }
