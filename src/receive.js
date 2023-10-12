@@ -137,8 +137,8 @@ module.exports = function (RED) {
 									var tabulatorData = {
 										"id": rowId, // Access the captured rowId
 										"value": s.unit !== undefined
-											? Math.round(s.value) + (s.unit ? " " + s.unit : "")
-											: Math.round(s.value)
+											? s.value.toFixed(2) + (s.unit ? " " + s.unit : "")
+											: s.value.toFixed(2)
 									};
 
 									var signalData = {
